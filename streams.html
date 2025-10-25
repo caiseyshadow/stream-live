@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Streaming Website</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #000;
+            color: #fff;
+        }
+        #videoList {
+            margin-top: 20px;
+        }
+        .video-container {
+            margin-bottom: 20px;
+            max-width: 800px;
+        }
+        iframe {
+            width: 100%;
+            height: 450px;
+            border: 0;
+        }
+        input[type="text"] {
+            background: #111;
+            color: #fff;
+            border: 1px solid #333;
+            padding: 8px;
+            width: 60%;
+            max-width: 600px;
+        }
+        input[type="file"] {
+            background: #111;
+            color: #fff;
+            border: 1px solid #333;
+            padding: 6px;
+            margin-left: 8px;
+        }
+        button {
+            background: #222;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 8px 12px;
+            margin-left: 8px;
+            cursor: pointer;
+        }
+        video {
+            width: 100%;
+            max-width: 600px;
+            margin-bottom: 20px;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+    <h1>Video Streaming Website</h1>
+    <input type="text" id="videoUrl" placeholder="Enter video URL" />
+    <button id="addVideo">Add Video</button>
+    <input type="file" id="fileInput" accept="video/*,.m3u8" multiple />
+    <div style="margin-top:12px;">
+        <label style="margin-right:12px;"><input id="autoplay" type="checkbox"> Autoplay (muted)</label>
+        <label style="margin-right:12px;"><input id="generatePoster" type="checkbox"> Generate poster from first frame</label>
+        <button id="removeAll" style="background:#440;">Remove All</button>
+    </div>
+    <div id="dropZone" style="margin-top:12px;padding:12px;border:1px dashed #333;max-width:800px;">Drag & drop files here to add (or use the file picker)</div>
+    <div id="gallery" style="margin-top:12px;max-width:800px;color:#ddd;"></div>
+    
+    <div id="videoList"></div>
+
+    <script>
+    // Utility: extract YouTube ID from common URL formats
+        function extractYouTubeID(url) {
+            const ytMatch = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+            if (ytMatch && ytMatch[1]) return ytMatch[1];
+            // fallback: try to read v= query param
+            try {
+                const u = new URL(url);
+                return u.searchParams.get('v');
+            } catch (e) { return null; }
+        }
+
+        function extractVimeoID(url) {
+            const v = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+            return v ? v[1] : null;
+        }
+
+        // Accept either a URL string or a File/Blob object
+        // Returns an object: { container, label, objectUrl? }
+        function createPlayerForSource(source) {
+            const container = document.createElement('div');
+            container.className = 'video-container';
+            let label = '';
+            let objectUrl = null;
+
+            // Read options from UI
+            const shouldAutoplay = !!document.getElementById('autoplay').checked;
+            const shouldGeneratePoster = !!document.getElementById('generatePoster').checked;
+
+            // Helper to try generate a poster from a video element
+            function tryGeneratePoster(videoEl) {
+                if (!shouldGeneratePoster) return;
+                // Wait for enough data
+                const capture = () => {
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = videoEl.videoWidth || 320;
+                        canvas.height = videoEl.videoHeight || 180;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+                        const dataUrl = canvas.toDataURL('image/png');
+                        videoEl.poster = dataUrl;
+                    } catch (e) {
+                        // cross-origin or other errors are possible; ignore
+                    }
+                };
+                if (videoEl.readyState >= 2) {
+                    capture();
+                } else {
+                    const onLoaded = () => { capture(); videoEl.removeEventListener('loadeddata', onLoaded); };
+                    videoEl.addEventListener('loadeddata', onLoaded);
+                }
+            }
+
+            // If source is a File or Blob, create an object URL and treat it as a direct file
+            if (source instanceof File || source instanceof Blob) {
+                const file = source;
+                label = file.name || 'Local file';
+                const name = file.name || '';
+                // Handle local HLS file (best-effort; may not work if playlist references segments by relative paths)
+                if (/\.m3u8$/i.test(name)) {
+                    const blobUrl = URL.createObjectURL(file);
+                    objectUrl = blobUrl;
+                    const video = document.createElement('video');
+                    video.controls = true;
+                    if (shouldAutoplay) { video.autoplay = true; video.muted = true; }
+                    video.setAttribute('playsinline', '');
+                    video.style.width = '100%';
+                    container.appendChild(video);
+                    if (window.Hls && Hls.isSupported()) {
+                        const hls = new Hls();
+                        hls.loadSource(blobUrl);
+                        hls.attachMedia(video);
+                        container._hls = hls;
+                    } else {
+                        video.src = blobUrl;
+                    }
+                    container._objectUrl = objectUrl;
+                    tryGeneratePoster(container.querySelector('video'));
+                    return { container, label, objectUrl };
+                }
+
+                // For other local video files (mp4/webm/ogg), use object URL
+                const video = document.createElement('video');
+                video.controls = true;
+                if (shouldAutoplay) { video.autoplay = true; video.muted = true; }
+                video.style.width = '100%';
+                const blob = URL.createObjectURL(file);
+                video.src = blob;
+                objectUrl = blob;
+                container.appendChild(video);
+                container._objectUrl = objectUrl;
+                tryGeneratePoster(video);
+                return { container, label, objectUrl };
+            }
+
+            // Otherwise treat source as a URL string
+            const url = String(source).trim();
+
+            // YouTube
+            const ytId = extractYouTubeID(url);
+            if (ytId) {
+                label = `YouTube: ${ytId}`;
+                const iframe = document.createElement('iframe');
+                iframe.src = `https://www.youtube.com/embed/${ytId}?rel=0`;
+                iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
+                iframe.allowFullscreen = true;
+                container.appendChild(iframe);
+                return { container, label };
+            }
+
+            // Vimeo
+            const vimeoId = extractVimeoID(url);
+            if (vimeoId) {
+                label = `Vimeo: ${vimeoId}`;
+                const iframe = document.createElement('iframe');
+                iframe.src = `https://player.vimeo.com/video/${vimeoId}`;
+                iframe.allow = 'autoplay; fullscreen; picture-in-picture';
+                iframe.allowFullscreen = true;
+                container.appendChild(iframe);
+                return { container, label };
+            }
+
+            // HLS (.m3u8)
+            if (/\.m3u8(\?|$)/i.test(url)) {
+                label = url;
+                const video = document.createElement('video');
+                video.controls = true;
+                if (shouldAutoplay) { video.autoplay = true; video.muted = true; }
+                video.setAttribute('playsinline', '');
+                video.style.width = '100%';
+                container.appendChild(video);
+                if (window.Hls && Hls.isSupported()) {
+                    const hls = new Hls();
+                    hls.loadSource(url);
+                    hls.attachMedia(video);
+                    container._hls = hls;
+                } else {
+                    video.src = url;
+                }
+                tryGeneratePoster(video);
+                return { container, label };
+            }
+
+            // Direct video files (mp4/webm/ogg)
+            if (/\.(mp4|webm|ogg)(\?.*)?$/i.test(url)) {
+                label = url.split('/').pop();
+                const video = document.createElement('video');
+                video.controls = true;
+                if (shouldAutoplay) { video.autoplay = true; video.muted = true; }
+                video.style.width = '100%';
+                video.src = url;
+                container.appendChild(video);
+                tryGeneratePoster(video);
+                return { container, label };
+            }
+
+            // Unknown: attempt to create a video element (best-effort)
+            label = url;
+            const fallback = document.createElement('video');
+            fallback.controls = true;
+            if (shouldAutoplay) { fallback.autoplay = true; fallback.muted = true; }
+            fallback.style.width = '100%';
+            fallback.src = url;
+            container.appendChild(fallback);
+            tryGeneratePoster(fallback);
+            return { container, label };
+        }
+
+        document.getElementById('addVideo').addEventListener('click', function() {
+            const input = document.getElementById('videoUrl');
+            const videoUrl = input.value;
+            if (!videoUrl) {
+                alert('Please enter a video URL.');
+                return;
+            }
+            const videoList = document.getElementById('videoList');
+            const player = createPlayerForSource(videoUrl);
+            videoList.appendChild(player.container);
+            addToGallery(player);
+            input.value = ''; // Clear input
+        });
+
+        // Handle file picker
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const files = Array.from(e.target.files || []);
+            const videoList = document.getElementById('videoList');
+            files.forEach(f => {
+                const player = createPlayerForSource(f);
+                videoList.appendChild(player.container);
+                addToGallery(player);
+            });
+            // Clear the input so same file can be re-selected if needed
+            e.target.value = '';
+        });
+
+        // Drag and drop support
+        const dropZone = document.getElementById('dropZone');
+        dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.style.borderColor = '#666'; });
+        dropZone.addEventListener('dragleave', function() { dropZone.style.borderColor = '#333'; });
+        dropZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            dropZone.style.borderColor = '#333';
+            const files = Array.from(e.dataTransfer.files || []);
+            const videoList = document.getElementById('videoList');
+            files.forEach(f => {
+                const player = createPlayerForSource(f);
+                videoList.appendChild(player.container);
+                addToGallery(player);
+            });
+        });
+
+        // Remove All
+        document.getElementById('removeAll').addEventListener('click', function() {
+            const videoList = document.getElementById('videoList');
+            const gallery = document.getElementById('gallery');
+            // destroy Hls instances and revoke object URLs
+            videoList.querySelectorAll('.video-container').forEach(c => {
+                if (c._hls && typeof c._hls.destroy === 'function') {
+                    try { c._hls.destroy(); } catch (e) {/*ignore*/}
+                }
+                if (c._objectUrl) {
+                    try { URL.revokeObjectURL(c._objectUrl); } catch (e) {/*ignore*/}
+                }
+            });
+            videoList.innerHTML = '';
+            gallery.innerHTML = '';
+        });
+
+        // Gallery helpers
+        function addToGallery(playerInfo) {
+            // playerInfo: { container, label, objectUrl }
+            const gallery = document.getElementById('gallery');
+            const item = document.createElement('div');
+            item.style.padding = '6px';
+            item.style.borderBottom = '1px solid #222';
+            item.style.display = 'flex';
+            item.style.justifyContent = 'space-between';
+            item.style.alignItems = 'center';
+
+            const left = document.createElement('div');
+            left.style.cursor = 'pointer';
+            left.textContent = playerInfo.label || 'Video';
+            left.title = 'Click to scroll to player';
+            left.addEventListener('click', () => {
+                playerInfo.container.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            });
+
+            const controls = document.createElement('div');
+            controls.style.display = 'flex';
+            controls.style.gap = '8px';
+
+            const removeBtn = document.createElement('button');
+            removeBtn.textContent = 'Remove';
+            removeBtn.style.background = '#600';
+            removeBtn.addEventListener('click', () => {
+                // destroy Hls if present
+                if (playerInfo.container._hls && typeof playerInfo.container._hls.destroy === 'function') {
+                    try { playerInfo.container._hls.destroy(); } catch (e) {/*ignore*/}
+                }
+                // revoke object URL if created
+                if (playerInfo.container._objectUrl) {
+                    try { URL.revokeObjectURL(playerInfo.container._objectUrl); } catch (e) {/*ignore*/}
+                }
+                // remove DOM nodes
+                try { playerInfo.container.remove(); } catch (e) {/*ignore*/}
+                try { item.remove(); } catch (e) {/*ignore*/}
+            });
+
+            controls.appendChild(removeBtn);
+            item.appendChild(left);
+            item.appendChild(controls);
+            gallery.appendChild(item);
+        }
+    </script>
+</body>
+</html>
